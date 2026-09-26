@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{margin:0;padding:0;background:transparent;color:#111;min-height:0}body{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}#root{display:flow-root;width:100%;max-width:100%;min-height:1px}.lh-render-error{font:12px/1.65 system-ui,sans-serif;padding:14px;border:1px solid #d8b6b6;background:#fff7f7;color:#8f3333;white-space:pre-wrap;word-break:break-word}.lh-render-note{font:12px/1.65 system-ui,sans-serif;padding:12px;color:#666}
+@media(max-width:850px){html,body,#root{max-width:100%}.lh-render-error,.lh-render-note{overflow-wrap:anywhere}}
+</style>
+<script src="vendor/typescript.js?v=1.9.2"></script>
+</head>
+<body><div id="root"></div>
+<script>
+(function(){
+  const root=document.getElementById('root');
+  const Fragment=Symbol('Fragment');
+  const SVG_TAGS=new Set(['svg','path','circle','rect','line','polyline','polygon','ellipse','g','defs','linearGradient','radialGradient','stop','text','tspan','clipPath','mask','filter','feGaussianBlur','feOffset','feBlend','symbol','use','marker','pattern','foreignObject']);
+  const UNITLESS=new Set(['animationIterationCount','borderImageOutset','borderImageSlice','borderImageWidth','boxFlex','boxFlexGroup','boxOrdinalGroup','columnCount','columns','flex','flexGrow','flexPositive','flexShrink','flexNegative','flexOrder','gridArea','gridRow','gridRowEnd','gridRowSpan','gridRowStart','gridColumn','gridColumnEnd','gridColumnSpan','gridColumnStart','fontWeight','lineClamp','lineHeight','opacity','order','orphans','tabSize','widows','zIndex','zoom','fillOpacity','floodOpacity','stopOpacity','strokeDasharray','strokeDashoffset','strokeMiterlimit','strokeOpacity','strokeWidth']);
+  let active=null;
+  let hooks=[];
+  let hookIndex=0;
+  let renderQueued=false;
+  let resizeObserver=null;
+  let pendingLayout=[];
+  let pendingEffects=[];
+  let pendingClasses=[];
+  let effectEpoch=0;
+
+  const first=v=>typeof v==='function'?v():v;
+  const depsEqual=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&a.every((v,i)=>Object.is(v,b[i]));
+  const copyDeps=d=>Array.isArray(d)?d.slice():d;
+
+  function safeCall(fn,...args){try{return fn&&fn(...args)}catch(err){showRuntimeError(err)}}
+  function cleanupSlot(slot){
+    if(!slot)return;
+    if((slot.kind==='effect'||slot.kind==='layout'||slot.kind==='insertion')&&typeof slot.cleanup==='function')safeCall(slot.cleanup);
+    if(slot.kind==='class'&&slot.inst&&typeof slot.inst.componentWillUnmount==='function')safeCall(slot.inst.componentWillUnmount.bind(slot.inst));
+  }
+  function disposeHooks(){hooks.forEach(cleanupSlot);hooks=[];pendingLayout=[];pendingEffects=[];pendingClasses=[];effectEpoch++}
+  function scheduleRender(){
+    if(renderQueued||!active)return;
+    renderQueued=true;
+    queueMicrotask(()=>{renderQueued=false;renderActive(false)});
+  }
+  function useState(initial){
+    const i=hookIndex++;
+    if(!hooks[i]||hooks[i].kind!=='state')hooks[i]={kind:'state',value:first(initial)};
+    const setValue=next=>{
+      const old=hooks[i].value;
+      const value=typeof next==='function'?next(old):next;
+      if(Object.is(old,value))return;
+      hooks[i].value=value;
+      scheduleRender();
+    };
+    return [hooks[i].value,setValue];
+  }
+  function useReducer(reducer,initial,init){
+    const i=hookIndex++;
+    if(!hooks[i]||hooks[i].kind!=='reducer')hooks[i]={kind:'reducer',value:init?init(initial):first(initial)};
+    const dispatch=action=>{
+      const old=hooks[i].value;
+      const value=reducer(old,action);
+      if(Object.is(old,value))return;
+      hooks[i].value=value;
+      scheduleRender();
+    };
+    return [hooks[i].value,dispatch];
+  }
+  function useRef(initial){
+    const i=hookIndex++;
+    if(!hooks[i]||hooks[i].kind!=='ref')hooks[i]={kind:'ref',value:{current:initial}};
+    return hooks[i].value;
+  }
+  function useMemo(fn,deps){
+    const i=hookIndex++;
+    if(!hooks[i]||hooks[i].kind!=='memo'||!depsEqual(hooks[i].deps,deps))hooks[i]={kind:'memo',value:fn(),deps:copyDeps(deps)};
+    return hooks[i].value;
+  }
+  function useCallback(fn,deps){return useMemo(()=>fn,deps)}
+  function useId(){
+    const i=hookIndex++;
+    if(!hooks[i]||hooks[i].kind!=='id')hooks[i]={kind:'id',value:'lh-'+Math.random().toString(36).slice(2,9)};
+    return hooks[i].value;
+  }
+  function registerEffect(kind,fn,deps){
+    const i=hookIndex++;
+    const prev=hooks[i];
+    const changed=!prev||prev.kind!==kind||deps===undefined||!depsEqual(prev.deps,deps);
+    if(!prev||prev.kind!==kind){if(prev)cleanupSlot(prev);hooks[i]={kind,fn,deps:copyDeps(deps),cleanup:null}}
+    else{hooks[i].fn=fn;hooks[i].deps=copyDeps(deps)}
+    if(changed)(kind==='effect'?pendingEffects:pendingLayout).push(i);
+  }
+  function useEffect(fn,deps){registerEffect('effect',fn,deps)}
+  function useLayoutEffect(fn,deps){registerEffect('layout',fn,deps)}
+  function useInsertionEffect(fn,deps){registerEffect('insertion',fn,deps)}
+  function useImperativeHandle(ref,create,deps){
+    useLayoutEffect(()=>{
+      const value=create();
+      if(typeof ref==='function')ref(value);else if(ref&&typeof ref==='object')ref.current=value;
+      return ()=>{if(typeof ref==='function')ref(null);else if(ref&&typeof ref==='object')ref.current=null};
+    },deps);
+  }
+  function useDeferredValue(value){const i=hookIndex++;if(!hooks[i]||hooks[i].kind!=='deferred')hooks[i]={kind:'deferred'};return value}
+  function useTransition(){
+    const i=hookIndex++;
+    if(!hooks[i]||hooks[i].kind!=='transition')hooks[i]={kind:'transition',start:fn=>{try{fn()}catch(e){showRuntimeError(e)}}};
+    return [false,hooks[i].start];
+  }
+  function useSyncExternalStore(subscribe,getSnapshot,getServerSnapshot){
+    const [value,setValue]=useState(()=>{try{return getSnapshot()}catch(e){return getServerSnapshot?getServerSnapshot():undefined}});
+    useEffect(()=>{
+      const update=()=>{try{setValue(getSnapshot())}catch(e){showRuntimeError(e)}};
+      update();
+      return typeof subscribe==='function'?subscribe(update):undefined;
+    },[subscribe,getSnapshot]);
+    return value;
+  }
+  function useDebugValue(){/* no visual devtools in local renderer */}
+
+  class Component{
+    constructor(props){this.props=props||{};this.state={}}
+    setState(next,cb){const patch=typeof next==='function'?next(this.state,this.props):next;this.state={...this.state,...(patch||{})};scheduleRender();if(typeof cb==='function')queueMicrotask(()=>safeCall(cb.bind(this)))}
+    forceUpdate(cb){scheduleRender();if(typeof cb==='function')queueMicrotask(()=>safeCall(cb.bind(this)))}
+  }
+  class PureComponent extends Component{}
+
+  function createContext(def){
+    const ctx={_default:def,_value:def};
+    ctx.Provider=({value,children})=>{ctx._value=value;return children};
+    ctx.Consumer=({children})=>typeof children==='function'?children(ctx._value):children;
+    return ctx;
+  }
+  function useContext(ctx){const i=hookIndex++;if(!hooks[i]||hooks[i].kind!=='context')hooks[i]={kind:'context'};return ctx&&('_value'in ctx)?ctx._value:ctx?ctx._default:undefined}
+
+  function memo(component){return component}
+  function forwardRef(fn){const wrapped=(props)=>fn(props,props&&Object.prototype.hasOwnProperty.call(props,'ref')?props.ref:null);wrapped.__lhForwardRef=fn;return wrapped}
+  function lazy(loader){
+    let state={status:'pending',value:null,error:null,promise:null};
+    const Lazy=(props)=>{
+      const [,tick]=useState(0);
+      if(!state.promise){state.promise=Promise.resolve().then(loader).then(m=>{state.status='done';state.value=m&&m.default?m.default:m;tick(x=>x+1)}).catch(e=>{state.status='error';state.error=e;tick(x=>x+1)})}
+      if(state.status==='error')throw state.error;
+      if(state.status==='done'&&state.value)return h(state.value,props);
+      return null;
+    };
+    return Lazy;
+  }
+  function startTransition(fn){try{fn()}catch(e){showRuntimeError(e)}}
+
+  const Children={
+    toArray:c=>Array.isArray(c)?c.flat(Infinity).filter(v=>v!=null&&v!==false&&v!==true):c==null?[]:[c],
+    count:c=>Children.toArray(c).length,
+    map:(c,fn)=>Children.toArray(c).map(fn),
+    forEach:(c,fn)=>Children.toArray(c).forEach(fn),
+    only:c=>{const a=Children.toArray(c);if(a.length!==1)throw new Error('React.Children.only expected one child.');return a[0]}
+  };
+  const passthrough=({children})=>children;
+  const React={Fragment,useState,useEffect,useLayoutEffect,useInsertionEffect,useMemo,useCallback,useRef,useReducer,useId,useContext,useImperativeHandle,useDeferredValue,useTransition,useSyncExternalStore,useDebugValue,Component,PureComponent,createElement:h,memo,forwardRef,createContext,lazy,startTransition,Children,createRef:()=>({current:null}),StrictMode:passthrough,Suspense:passthrough,Profiler:passthrough,isValidElement:v=>v instanceof Node};
+
+  function append(parent,child){
+    if(child==null||child===false||child===true)return;
+    if(Array.isArray(child)){child.forEach(x=>append(parent,x));return}
+    if(child instanceof Node){parent.appendChild(child);return}
+    parent.appendChild(document.createTextNode(String(child)));
+  }
+  function setStyle(el,style){
+    if(!style||typeof style!=='object')return;
+    for(const [k,v] of Object.entries(style)){
+      if(v==null)continue;
+      try{
+        if(k.startsWith('--'))el.style.setProperty(k,String(v));
+        else if(k.includes('-'))el.style.setProperty(k,typeof v==='number'&&!UNITLESS.has(k)?v+'px':String(v));
+        else el.style[k]=typeof v==='number'&&!UNITLESS.has(k)?v+'px':String(v);
+      }catch(e){}
+    }
+  }
+  function eventName(key,el){
+    if(key==='onDoubleClick')return 'dblclick';
+    if(key==='onChange'&&(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)&&!['checkbox','radio','file'].includes(el.type))return 'input';
+    return key.slice(2).toLowerCase();
+  }
+  function setRef(ref,value){try{if(typeof ref==='function')ref(value);else if(ref&&typeof ref==='object')ref.current=value}catch(e){showRuntimeError(e)}}
+  function classNode(type,finalProps){
+    const i=hookIndex++;
+    let slot=hooks[i];
+    const isNew=!slot||slot.kind!=='class'||slot.type!==type;
+    if(isNew){if(slot)cleanupSlot(slot);const inst=new type(finalProps);inst.props=finalProps;slot=hooks[i]={kind:'class',type,inst,mounted:false,prevProps:null,prevState:null}}
+    const inst=slot.inst;
+    const prevProps=slot.mounted?inst.props:null;
+    const prevState=slot.mounted?{...inst.state}:null;
+    inst.props=finalProps;
+    const node=inst.render();
+    pendingClasses.push({slot,isNew:!slot.mounted,prevProps,prevState});
+    return node;
+  }
+  function h(type,props,...children){
+    props=props||{};
+    if(type===Fragment){const f=document.createDocumentFragment();children.forEach(c=>append(f,c));return f}
+    if(typeof type==='function'){
+      const finalProps={...props,children:children.length<=1?children[0]:children};
+      if(type.prototype&&typeof type.prototype.render==='function')return classNode(type,finalProps);
+      return type(finalProps);
+    }
+    if(typeof type!=='string')return document.createTextNode('');
+    const el=SVG_TAGS.has(type)?document.createElementNS('http://www.w3.org/2000/svg',type):document.createElement(type);
+    let html=null;
+    for(const [rawKey,val] of Object.entries(props)){
+      if(rawKey==='children'||rawKey==='key'||rawKey==='ref')continue;
+      if(/^on[A-Z]/.test(rawKey)){
+        if(typeof val==='function'){
+          try{el.addEventListener(eventName(rawKey,el),ev=>{try{val(ev)}catch(err){showRuntimeError(err)}})}catch(e){}
+        }
+        continue;
+      }
+      if(rawKey==='dangerouslySetInnerHTML'){html=val&&val.__html!=null?String(val.__html):'';continue}
+      if(rawKey==='style'){setStyle(el,val);continue}
+      const key=rawKey==='className'?'class':rawKey==='htmlFor'?'for':rawKey;
+      if(val===false||val==null)continue;
+      if(key in el && !['list','form','type','width','height'].includes(key)){
+        try{el[key]=val;continue}catch(e){}
+      }
+      if(val===true){try{el.setAttribute(key,'')}catch(e){};continue}
+      try{el.setAttribute(key,String(val))}catch(e){try{el[key]=val}catch(_){} }
+    }
+    if(html!=null)el.innerHTML=html;else children.forEach(c=>append(el,c));
+    if(props.ref)setRef(props.ref,el);
+    return el;
+  }
+
+  function createPortal(children,container){
+    if(container instanceof Node){queueMicrotask(()=>{try{container.replaceChildren();append(container,children);scheduleReports(active&&active.token)}catch(e){showRuntimeError(e)}})}
+    return null;
+  }
+  const ReactDOM={createPortal,findDOMNode:x=>x instanceof Node?x:null,flushSync:fn=>fn&&fn(),render:(node,container)=>{if(container instanceof Node){container.replaceChildren();append(container,node)}},unmountComponentAtNode:container=>{if(container instanceof Node)container.replaceChildren()},createRoot:container=>({render:node=>{if(container instanceof Node){container.replaceChildren();append(container,node)}},unmount:()=>{if(container instanceof Node)container.replaceChildren()}})};
+
+  function externalComponent(name){
+    const component=function(props){return h('span',{'data-external-component':name,style:{display:'contents'}},props&&props.children)};
+    return new Proxy(component,{get:(target,key)=>{
+      if(key==='__esModule')return false;
+      if(key==='default')return target;
+      if(key==='div'||key==='span'||key==='button'||key==='section'||key==='article'||key==='main'||key==='aside'||key==='nav'||key==='header'||key==='footer'||key==='svg'||key==='path')return function(props){
+        const clean={...(props||{})};['initial','animate','exit','variants','transition','whileHover','whileTap','layout','layoutId'].forEach(k=>delete clean[k]);return h(String(key),clean,props&&props.children)
+      };
+      return function(props){return h('span',{'data-external-component':name+'.'+String(key),style:{display:'contents'}},props&&props.children)};
+    }});
+  }
+  function localRequire(name){
+    if(name==='react')return React;
+    if(name==='react-dom'||name==='react-dom/client')return ReactDOM;
+    return externalComponent(String(name||'module'));
+  }
+
+  function sanitizeSource(src){
+    src=String(src||'');
+    const globals=new Set(['React','ReactDOM','Fragment','useState','useEffect','useLayoutEffect','useInsertionEffect','useMemo','useCallback','useRef','useReducer','useId','useContext','useImperativeHandle','useDeferredValue','useTransition','useSyncExternalStore','useDebugValue','createPortal','startTransition']);
+    const imported=new Set();
+    src=src.replace(/^\s*import\s+([\s\S]*?)\s+from\s+['"]([^'"]+)['"]\s*;?\s*$/gm,(all,clause,moduleName)=>{
+      clause=clause.trim();
+      const add=n=>{n=String(n||'').trim();if(n&&!globals.has(n)&&/^[A-Za-z_$][\w$]*$/.test(n))imported.add(n)};
+      const ns=clause.match(/\*\s+as\s+([A-Za-z_$][\w$]*)/);if(ns)add(ns[1]);
+      const br=clause.match(/\{([\s\S]*?)\}/);if(br)br[1].split(',').forEach(x=>{const mm=x.trim().match(/^([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?$/);if(mm)add(mm[2]||mm[1])});
+      const def=clause.split(',')[0].trim();if(def&&!def.startsWith('{')&&!def.startsWith('*'))add(def);
+      return '';
+    });
+    src=src.replace(/^\s*import\s+['"][^'"]+['"]\s*;?\s*$/gm,'');
+    src=src.replace(/\bexport\s+default\s+function\s+([A-Za-z_$][\w$]*)/g,'function $1');
+    src=src.replace(/\bexport\s+default\s+class\s+([A-Za-z_$][\w$]*)/g,'class $1');
+    src=src.replace(/\bexport\s+default\s+(?=\()/g,'const __DefaultComponent = ');
+    src=src.replace(/\bexport\s+(?=(?:function|class|const|let|var)\b)/g,'');
+    if(imported.size){
+      const pre=[...imported].map(n=>'const '+n+'=__lhExternal('+JSON.stringify(n)+');').join('\n')+'\n';
+      src=pre+src;
+    }
+    return src;
+  }
+  function componentNames(src){
+    const names=[];const add=n=>n&&/^[A-Z_$]/.test(n)&&!names.includes(n)&&names.push(n);let m;
+    const fn=/\bfunction\s+([A-Z_$][\w$]*)\s*\(/g;while((m=fn.exec(src)))add(m[1]);
+    const cl=/\bclass\s+([A-Z_$][\w$]*)\s+extends\s+(?:React\.)?(?:Component|PureComponent)\b/g;while((m=cl.exec(src)))add(m[1]);
+    const ar=/\b(?:const|let|var)\s+([A-Z_$][\w$]*)(?:\s*:\s*[^=;]+)?\s*=\s*(?:(?:React\.)?(?:memo|forwardRef)\s*\()?\s*(?:async\s*)?\(?[^;\n]{0,240}?=>/g;while((m=ar.exec(src)))add(m[1]);
+    if(src.includes('const __DefaultComponent ='))add('__DefaultComponent');
+    return names;
+  }
+  function compile(code){
+    if(!window.ts)throw new Error('로컬 JSX 변환기를 불러오지 못했습니다.');
+    const source=sanitizeSource(code);
+    const names=componentNames(source);
+    const component=names[0]||'__DefaultComponent';
+    const js=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.None,jsx:ts.JsxEmit.React,jsxFactory:'h',jsxFragmentFactory:'Fragment',esModuleInterop:true,allowJs:true,experimentalDecorators:true,useDefineForClassFields:false}}).outputText;
+    return new Function('h','Fragment','React','ReactDOM','useState','useEffect','useLayoutEffect','useInsertionEffect','useMemo','useCallback','useRef','useReducer','useId','useContext','useImperativeHandle','useDeferredValue','useTransition','useSyncExternalStore','useDebugValue','createPortal','startTransition','props','__lhExternal','require','process',js+'\n;try{ return (typeof '+component+'!=="undefined") ? h('+component+', props) : null }catch(e){ throw e }');
+  }
+  function execute(){
+    return active.runner(h,Fragment,React,ReactDOM,useState,useEffect,useLayoutEffect,useInsertionEffect,useMemo,useCallback,useRef,useReducer,useId,useContext,useImperativeHandle,useDeferredValue,useTransition,useSyncExternalStore,useDebugValue,createPortal,startTransition,active.props||{},externalComponent,localRequire,{env:{NODE_ENV:'production'}});
+  }
+  function showRuntimeError(err){
+    root.innerHTML='<div class="lh-render-error"><b>JSX 실행 오류</b>\n'+escapeHtml(err&&err.stack?err.stack:err&&err.message?err.message:String(err))+'</div>';
+    scheduleReports(active&&active.token);
+  }
+  function flushEffectList(indices){
+    for(const i of indices){
+      const slot=hooks[i];if(!slot||typeof slot.fn!=='function')continue;
+      if(typeof slot.cleanup==='function')safeCall(slot.cleanup);
+      const result=safeCall(slot.fn);
+      slot.cleanup=typeof result==='function'?result:null;
+    }
+  }
+  function flushClassLifecycles(){
+    for(const item of pendingClasses.splice(0)){
+      const {slot,isNew,prevProps,prevState}=item,inst=slot.inst;
+      if(isNew){slot.mounted=true;if(typeof inst.componentDidMount==='function')safeCall(inst.componentDidMount.bind(inst))}
+      else if(typeof inst.componentDidUpdate==='function')safeCall(inst.componentDidUpdate.bind(inst),prevProps,prevState);
+    }
+  }
+  function renderActive(resetHooks){
+    if(!active)return;
+    if(resetHooks)disposeHooks();
+    pendingLayout=[];pendingEffects=[];pendingClasses=[];
+    hookIndex=0;
+    root.innerHTML='';
+    window.__lhToken=active.token;
+    document.documentElement.dataset.theme=active.theme||'light';
+    try{
+      const node=execute();
+      if(node)append(root,node);else root.innerHTML='<div class="lh-render-note">렌더링할 컴포넌트를 찾지 못했습니다.</div>';
+    }catch(err){showRuntimeError(err);return}
+    bindLateResources();
+    const localEpoch=++effectEpoch;
+    flushEffectList(pendingLayout.splice(0));
+    flushClassLifecycles();
+    queueMicrotask(()=>{if(localEpoch!==effectEpoch||!active)return;flushEffectList(pendingEffects.splice(0));scheduleReports(active.token)});
+    scheduleReports(active.token);
+  }
+  function evaluatePropExpression(expr){
+    expr=String(expr??'').trim();
+    if(!expr)return undefined;
+    if(!window.ts)throw new Error('로컬 JSX 변환기를 불러오지 못했습니다.');
+    const source='const __lhPropValue = ('+expr+');';
+    const js=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.None,jsx:ts.JsxEmit.React,jsxFactory:'h',jsxFragmentFactory:'Fragment',esModuleInterop:true,allowJs:true}}).outputText;
+    return new Function('h','Fragment','React','ReactDOM','require','process',js+'\n;return __lhPropValue;')(h,Fragment,React,ReactDOM,localRequire,{env:{NODE_ENV:'production'}});
+  }
+  function revivePropValue(value){
+    if(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===1&&typeof value.__lhExpr==='string'){
+      try{return evaluatePropExpression(value.__lhExpr)}catch(err){
+        console.warn('[Log Home] Prop expression could not be evaluated:',value.__lhExpr,err);
+        return undefined;
+      }
+    }
+    if(Array.isArray(value))return value.map(revivePropValue);
+    if(value&&typeof value==='object'){
+      const out={};for(const [k,v] of Object.entries(value))out[k]=revivePropValue(v);return out;
+    }
+    return value;
+  }
+  function reviveProps(props){
+    const out={};for(const [k,v] of Object.entries(props||{}))out[k]=revivePropValue(v);return out;
+  }
+  function render(code,props,theme,token){
+    try{
+      disposeHooks();
+      active={code:String(code||''),props:reviveProps(props||{}),theme:theme||'light',token:token||'',runner:compile(code)};
+      renderActive(false);
+    }catch(err){
+      active={code:String(code||''),props:reviveProps(props||{}),theme:theme||'light',token:token||'',runner:null};
+      showRuntimeError(err);
+    }
+  }
+  function escapeHtml(s){return String(s).replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]))}
+  function measure(){
+    const rr=root.getBoundingClientRect();
+    let bottom=rr.bottom;
+    for(const el of root.querySelectorAll('*')){
+      const r=el.getBoundingClientRect();
+      if(Number.isFinite(r.bottom))bottom=Math.max(bottom,r.bottom);
+    }
+    // Do not include body/documentElement.scrollHeight here. Those values are at
+    // least as tall as the parent-assigned iframe viewport, which previously
+    // created a height feedback loop (+2px on every report).
+    return Math.max(80,Math.ceil(Math.max(root.scrollHeight,bottom-rr.top)));
+  }
+  function report(token){if(!token)return;parent.postMessage({type:'jsx-preview-height',token,h:measure()},'*')}
+  function scheduleReports(token){
+    report(token);requestAnimationFrame(()=>report(token));
+    [40,120,350,900,1800,3200].forEach(ms=>setTimeout(()=>report(token),ms));
+  }
+  function bindLateResources(){
+    root.querySelectorAll('img,video,iframe,audio').forEach(el=>{
+      ['load','loadedmetadata','error'].forEach(ev=>el.addEventListener(ev,()=>scheduleReports(active&&active.token),{once:true}));
+    });
+    if(document.fonts&&document.fonts.ready)document.fonts.ready.then(()=>scheduleReports(active&&active.token)).catch(()=>{});
+  }
+  window.addEventListener('message',e=>{const d=e.data||{};if(d.type==='render-jsx')render(d.code,d.props,d.theme,d.token)});
+  window.addEventListener('error',e=>{if(active&&e.error)showRuntimeError(e.error)});
+  window.addEventListener('unhandledrejection',e=>{if(active)showRuntimeError(e.reason||new Error('Unhandled promise rejection'))});
+  try{resizeObserver=new ResizeObserver(()=>report(window.__lhToken));resizeObserver.observe(root);resizeObserver.observe(document.body)}catch(e){}
+  window.addEventListener('resize',()=>report(window.__lhToken));
+  window.addEventListener('beforeunload',()=>disposeHooks());
+})();
+</script>
+</body></html>
