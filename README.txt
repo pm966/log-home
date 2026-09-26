@@ -4,27 +4,6 @@ LOG HOME — WEB EDITION
 이 폴더는 GitHub Pages 같은 정적 웹 호스팅에 올려 사용하는 배포본입니다.
 프로그램 설치나 별도 서버가 필요하지 않습니다.
 
-GitHub Pages에 올리기
-1. GitHub에 새 공개 Repository를 만듭니다.
-2. 이 log_home 폴더 안의 파일들을 Repository 최상위(root)에 업로드합니다.
-   - index.html
-   - renderer.html
-   - version.json
-   - vendor/typescript.js
-   - vendor/html2canvas.min.js
-   - vendor/html2canvas.LICENSE.txt
-   - vendor/jszip.min.js
-   - vendor/jszip.LICENSE.txt
-   - .nojekyll
-3. Repository Settings > Pages에서 배포 소스를 main 브랜치 / root로 설정합니다.
-4. 생성된 https://...github.io/... 주소를 공유하면 됩니다.
-
-업데이트 방식
-- 이후 index.html, renderer.html 등의 코드를 GitHub에서 교체/수정하면 GitHub Pages 쪽 웹 코드가 갱신됩니다.
-- Log Home은 페이지를 열 때 version.json을 확인합니다. 배포본의 버전이 바뀌면 캐시를 우회해 한 번 자동 새로고침합니다.
-- 이 배포본을 기반으로 새 버전을 만들 때 index.html의 APP_VERSION과 version.json의 version을 함께 변경하세요.
-- PWA/서비스 워커를 사용하지 않으므로 설치된 앱 캐시를 따로 갱신할 필요가 없습니다.
-
 개인 데이터 저장
 - 웹사이트에는 Log Home 코드만 있습니다.
 - 로그, 카테고리, 캐릭터/페어, JSX 템플릿, 설정, 작성 중 초안은 사용자가 선택한 실제 JSON 파일에 저장됩니다.
